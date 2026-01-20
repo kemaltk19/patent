@@ -1,12 +1,10 @@
 /**
- * Türk Patent API - Hafif Versiyon
- * puppeteer-core + @sparticuz/chromium ile optimize edilmiş
+ * Türk Patent API - Railway Optimized
  */
 
 const express = require('express');
 const cors = require('cors');
 const puppeteer = require('puppeteer-core');
-const chromium = require('@sparticuz/chromium');
 
 const app = express();
 app.use(cors());
@@ -14,13 +12,18 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
-// Browser instance'ı başlat
+// Browser başlat
 async function getBrowser() {
     return puppeteer.launch({
-        args: chromium.args,
-        defaultViewport: chromium.defaultViewport,
-        executablePath: await chromium.executablePath(),
-        headless: chromium.headless,
+        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
+        headless: 'new',
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-gpu',
+            '--single-process'
+        ]
     });
 }
 
@@ -44,7 +47,6 @@ app.post('/api/search', async (req, res) => {
             timeout: 30000
         });
 
-        // Marka Adı alanını bul ve yaz
         await page.waitForSelector('input.MuiInputBase-input', { timeout: 10000 });
 
         const inputs = await page.$$('input.MuiInputBase-input');
@@ -56,7 +58,6 @@ app.post('/api/search', async (req, res) => {
             }
         }
 
-        // Sorgula butonunu tıkla
         await page.evaluate(() => {
             const buttons = document.querySelectorAll('button');
             for (const btn of buttons) {
@@ -69,7 +70,6 @@ app.post('/api/search', async (req, res) => {
 
         await new Promise(r => setTimeout(r, 5000));
 
-        // Sonuçları çek
         const results = await page.evaluate(() => {
             const rows = document.querySelectorAll('tr');
             const data = [];
@@ -101,7 +101,7 @@ app.post('/api/search', async (req, res) => {
 });
 
 app.get('/', (req, res) => {
-    res.json({ status: 'ok', message: 'Türk Patent API Lite çalışıyor' });
+    res.json({ status: 'ok', message: 'Türk Patent API çalışıyor' });
 });
 
 app.listen(PORT, () => {

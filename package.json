@@ -1,7 +1,7 @@
 {
-    "name": "turkpatent-api-lite",
+    "name": "turkpatent-api",
     "version": "1.0.0",
-    "description": "Türk Patent API - Hafif Versiyon",
+    "description": "Türk Patent API",
     "main": "index.js",
     "scripts": {
         "start": "node index.js"
@@ -9,8 +9,7 @@
     "dependencies": {
         "express": "^4.18.2",
         "cors": "^2.8.5",
-        "puppeteer-core": "^21.0.0",
-        "@sparticuz/chromium": "^119.0.0"
+        "puppeteer-core": "^21.0.0"
     },
     "engines": {
         "node": ">=18.0.0"
