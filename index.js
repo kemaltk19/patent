@@ -1,11 +1,11 @@
 /**
- * Türk Patent API - Full Detail Support
- * Marka arama + Detay sayfası bilgileri
+ * Türk Patent API - High Performance Cluster Version
+ * Puppeteer Cluster ile eşzamanlı istek yönetimi
  */
 
 const express = require('express');
 const cors = require('cors');
-const puppeteer = require('puppeteer-core');
+const { Cluster } = require('puppeteer-cluster');
 
 const app = express();
 app.use(cors());
@@ -13,154 +13,198 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
-// Browser başlat
-async function getBrowser() {
-    return puppeteer.launch({
-        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
-        headless: 'new',
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--single-process']
+// Cluster instance
+let cluster;
+
+// Cluster başlatma fonksiyonu
+async function initCluster() {
+    cluster = await Cluster.launch({
+        concurrency: Cluster.CONCURRENCY_CONTEXT, // En hızlı ve izole yöntem (Incognito pages)
+        maxConcurrency: 10, // 10 Eşzamanlı İşlem (Asenkron)
+        puppeteerOptions: {
+            executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
+            headless: 'new',
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-gpu',
+                '--single-process',
+                '--no-zygote',
+                '--disable-extensions', // Hız
+                '--mute-audio',        // RAM
+                '--disable-background-networking'
+            ]
+        },
+        timeout: 60000 // 60 saniye timeout
+    });
+
+    // Her görevde yapılacak genel işlemler (Hız optimizasyonu)
+    // Ancak Cluster.task ile fonksiyon bazlı çalıştığımız için burada global task tanımlamıyoruz.
+    // Sayfa bazlı optimizasyonları aşağıda yapacağız.
+
+    console.log('Cluster başlatıldı - Max Concurrency: 5');
+}
+
+// Performans için gereksiz kaynakları engelle
+async function optimizePage(page) {
+    await page.setRequestInterception(true);
+    page.on('request', (req) => {
+        const resourceType = req.resourceType();
+        if (['image', 'stylesheet', 'font', 'media'].includes(resourceType)) {
+            req.abort();
+        } else {
+            req.continue();
+        }
     });
 }
 
-// Marka Arama Endpoint
-app.post('/api/search', async (req, res) => {
-    const { searchText } = req.body.params || req.body;
-    const limit = req.body.limit || 100;
+// Marka Arama Görevi
+const searchTask = async ({ page, data: { searchText, limit } }) => {
+    await optimizePage(page);
 
-    if (!searchText) return res.json({ success: false, error: 'Arama terimi gerekli' });
+    await page.goto('https://www.turkpatent.gov.tr/arastirma-yap', { waitUntil: 'domcontentloaded', timeout: 30000 });
 
-    let browser;
-    try {
-        browser = await getBrowser();
-        const page = await browser.newPage();
-
-        await page.goto('https://www.turkpatent.gov.tr/arastirma-yap', { waitUntil: 'networkidle2', timeout: 30000 });
-        await page.waitForSelector('input.MuiInputBase-input', { timeout: 10000 });
-
-        const inputs = await page.$$('input.MuiInputBase-input');
-        for (const input of inputs) {
-            const placeholder = await input.evaluate(el => el.placeholder);
-            if (placeholder && placeholder.includes('Marka')) {
-                await input.type(searchText);
-                break;
-            }
+    // Input bekle ve yaz
+    await page.waitForSelector('input.MuiInputBase-input', { timeout: 10000 });
+    const inputs = await page.$$('input.MuiInputBase-input');
+    for (const input of inputs) {
+        const placeholder = await input.evaluate(el => el.placeholder);
+        if (placeholder && placeholder.includes('Marka')) {
+            await input.type(searchText);
+            break;
         }
-
-        await page.evaluate(() => {
-            const buttons = document.querySelectorAll('button');
-            for (const btn of buttons) {
-                if (btn.textContent.includes('Sorgula')) { btn.click(); break; }
-            }
-        });
-
-        await new Promise(r => setTimeout(r, 5000));
-
-        const results = await page.evaluate((maxLimit) => {
-            const rows = document.querySelectorAll('tr');
-            const data = [];
-            rows.forEach((row, idx) => {
-                if (idx === 0 || data.length >= maxLimit) return;
-                const cells = row.querySelectorAll('td');
-                if (cells.length >= 7) {
-                    data.push({
-                        markaName: cells[2]?.innerText?.trim() || '',
-                        applicationNo: cells[1]?.innerText?.trim() || '',
-                        holderName: cells[3]?.innerText?.trim() || '',
-                        applicationDate: cells[4]?.innerText?.trim() || '',
-                        currentStatus: cells[6]?.innerText?.trim() || '',
-                        niceClasses: cells[7]?.innerText?.trim() || ''
-                    });
-                }
-            });
-            return data;
-        }, limit);
-
-        await browser.close();
-        res.json({ success: true, source: 'live', payload: { items: results } });
-    } catch (error) {
-        if (browser) await browser.close();
-        res.json({ success: false, error: error.message });
     }
-});
 
-// Detay Sayfası Endpoint
-app.post('/api/detail', async (req, res) => {
-    const { applicationNo } = req.body;
-
-    if (!applicationNo) return res.json({ success: false, error: 'Başvuru numarası gerekli' });
-
-    let browser;
-    try {
-        browser = await getBrowser();
-        const page = await browser.newPage();
-
-        // Arama sayfasına git ve başvuru numarasıyla ara
-        await page.goto('https://www.turkpatent.gov.tr/arastirma-yap', { waitUntil: 'networkidle2', timeout: 30000 });
-        await page.waitForSelector('input.MuiInputBase-input', { timeout: 10000 });
-
-        const inputs = await page.$$('input.MuiInputBase-input');
-        for (const input of inputs) {
-            const placeholder = await input.evaluate(el => el.placeholder);
-            if (placeholder && placeholder.includes('Marka')) {
-                await input.type(applicationNo);
-                break;
-            }
+    // Sorgula butonuna tıkla
+    await page.evaluate(() => {
+        const buttons = document.querySelectorAll('button');
+        for (const btn of buttons) {
+            if (btn.textContent.includes('Sorgula')) { btn.click(); break; }
         }
+    });
 
-        await page.evaluate(() => {
-            const buttons = document.querySelectorAll('button');
-            for (const btn of buttons) {
-                if (btn.textContent.includes('Sorgula')) { btn.click(); break; }
+    // Sonuçları bekle
+    try {
+        await page.waitForFunction(
+            () => document.querySelectorAll('tbody tr').length > 0,
+            { timeout: 10000 }
+        );
+    } catch (e) {
+        // Timeout olursa belki sonuç yoktur, devam et
+    }
+
+    // Veriyi çek
+    const results = await page.evaluate((maxLimit) => {
+        const rows = document.querySelectorAll('tr');
+        const data = [];
+        rows.forEach((row, idx) => {
+            if (idx === 0 || data.length >= maxLimit) return; // Header atla ve limit kontrolü
+            const cells = row.querySelectorAll('td');
+            if (cells.length >= 7) {
+                // Güvenli veri çekimi (innerText null check)
+                const getText = (cell) => cell?.innerText?.trim() || '';
+
+                data.push({
+                    markaName: getText(cells[2]),
+                    applicationNo: getText(cells[1]),
+                    holderName: getText(cells[3]),
+                    applicationDate: getText(cells[4]),
+                    currentStatus: getText(cells[6]),
+                    niceClasses: getText(cells[7])
+                });
             }
         });
+        return data;
+    }, limit);
 
-        await new Promise(r => setTimeout(r, 4000));
+    return results;
+};
 
-        // DETAY butonuna tıkla
-        await page.evaluate(() => {
-            const detayBtn = document.querySelector('button[class*="detay"], button:has-text("DETAY")');
-            if (detayBtn) detayBtn.click();
-            else {
-                const buttons = document.querySelectorAll('button');
-                for (const btn of buttons) {
-                    if (btn.textContent.includes('DETAY')) { btn.click(); break; }
+// Detay Arama Görevi
+const detailTask = async ({ page, data: { applicationNo } }) => {
+    await optimizePage(page);
+
+    // Direkt link ile detaya gitmeyi dene (daha hızlı olabilir mi? Hayır, token/cookie istiyor. Aramadan gitmek en güvenlisi)
+    await page.goto('https://www.turkpatent.gov.tr/arastirma-yap', { waitUntil: 'domcontentloaded', timeout: 30000 });
+
+    await page.waitForSelector('input.MuiInputBase-input', { timeout: 10000 });
+    const inputs = await page.$$('input.MuiInputBase-input');
+    for (const input of inputs) {
+        const placeholder = await input.evaluate(el => el.placeholder);
+        if (placeholder && placeholder.includes('Marka')) {
+            await input.type(applicationNo);
+            break;
+        }
+    }
+
+    await page.evaluate(() => {
+        const buttons = document.querySelectorAll('button');
+        for (const btn of buttons) {
+            if (btn.textContent.includes('Sorgula')) { btn.click(); break; }
+        }
+    });
+
+    // Detay butonunu bekle
+    try {
+        await page.waitForFunction(
+            () => {
+                const btns = document.querySelectorAll('button');
+                return Array.from(btns).some(b => b.textContent.includes('DETAY'));
+            },
+            { timeout: 10000 }
+        );
+    } catch (e) {
+        return { error: 'Sonuç bulunamadı' };
+    }
+
+    // Tıkla
+    await page.evaluate(() => {
+        const buttons = document.querySelectorAll('button');
+        for (const btn of buttons) {
+            if (btn.textContent.includes('DETAY')) { btn.click(); break; }
+        }
+    });
+
+    // Detay modalının açılmasını bekle (Table başlıkları gelene kadar)
+    await new Promise(r => setTimeout(r, 2000)); // Kısa bir bekleme şart
+
+    // Veriyi çek
+    return await page.evaluate(() => {
+        const result = {
+            markaBilgileri: {},
+            islemBilgileri: []
+        };
+
+        // Tablo hücrelerinden bilgi çek
+        const rows = document.querySelectorAll('table tr, .MuiTableRow-root');
+
+        rows.forEach(row => {
+            const cells = row.querySelectorAll('td, th');
+            if (cells.length >= 2) {
+                const label = cells[0]?.innerText?.trim();
+                const value = cells[1]?.innerText?.trim();
+                // Sadece geçerli etiketleri al
+                if (label && value && !label.includes('İşlem')) {
+                    result.markaBilgileri[label] = value;
+                }
+                // 4 sütunlu satırlar
+                if (cells.length >= 4) {
+                    const label2 = cells[2]?.innerText?.trim();
+                    const value2 = cells[3]?.innerText?.trim();
+                    if (label2 && value2) {
+                        result.markaBilgileri[label2] = value2;
+                    }
                 }
             }
         });
 
-        await new Promise(r => setTimeout(r, 3000));
+        // İşlem bilgileri tablosu (Genellikle son tablo)
+        const tables = document.querySelectorAll('table');
+        if (tables.length > 1) {
+            const islemTable = tables[tables.length - 1];
+            const islemRows = islemTable.querySelectorAll('tr');
 
-        // Detay bilgilerini çek
-        const detail = await page.evaluate(() => {
-            const result = {
-                markaBilgileri: {},
-                islemBilgileri: []
-            };
-
-            // Tablo hücrelerinden bilgi çek
-            const rows = document.querySelectorAll('table tr, .MuiTableRow-root');
-
-            rows.forEach(row => {
-                const cells = row.querySelectorAll('td, th');
-                if (cells.length >= 2) {
-                    const label = cells[0]?.innerText?.trim();
-                    const value = cells[1]?.innerText?.trim();
-                    if (label && value) {
-                        result.markaBilgileri[label] = value;
-                    }
-                    // 4 sütunlu satırlar için
-                    if (cells.length >= 4) {
-                        const label2 = cells[2]?.innerText?.trim();
-                        const value2 = cells[3]?.innerText?.trim();
-                        if (label2 && value2) {
-                            result.markaBilgileri[label2] = value2;
-                        }
-                    }
-                }
-            });
-
-            // İşlem bilgileri tablosu
-            const islemRows = document.querySelectorAll('table:last-of-type tr');
             islemRows.forEach((row, idx) => {
                 if (idx === 0) return; // Header
                 const cells = row.querySelectorAll('td');
@@ -173,20 +217,57 @@ app.post('/api/detail', async (req, res) => {
                     });
                 }
             });
+        }
 
-            return result;
-        });
+        return result;
+    });
+};
 
-        await browser.close();
+// Sunucu başlatıldığında Cluster'ı kur
+initCluster();
+
+app.post('/api/search', async (req, res) => {
+    const { searchText } = req.body.params || req.body;
+    const limit = req.body.limit || 100;
+
+    if (!searchText) return res.json({ success: false, error: 'Arama terimi gerekli' });
+
+    try {
+        // Görevi cluster'a ekle ve sonucu bekle
+        const results = await cluster.execute({ searchText, limit }, searchTask);
+        res.json({ success: true, source: 'live-cluster', payload: { items: results } });
+    } catch (error) {
+        console.error('Search Error:', error);
+        res.json({ success: false, error: error.message });
+    }
+});
+
+app.post('/api/detail', async (req, res) => {
+    const { applicationNo } = req.body;
+
+    if (!applicationNo) return res.json({ success: false, error: 'Başvuru numarası gerekli' });
+
+    try {
+        const detail = await cluster.execute({ applicationNo }, detailTask);
+        if (detail.error) throw new Error(detail.error);
         res.json({ success: true, detail });
     } catch (error) {
-        if (browser) await browser.close();
+        console.error('Detail Error:', error);
         res.json({ success: false, error: error.message });
     }
 });
 
 app.get('/', (req, res) => {
-    res.json({ status: 'ok', message: 'Türk Patent API çalışıyor', endpoints: ['/api/search', '/api/detail'] });
+    res.json({
+        status: 'ok',
+        message: 'Türk Patent API - Cluster Mode (High Performance)',
+        concurrency: 5
+    });
 });
 
-app.listen(PORT, () => console.log(`API: ${PORT}`));
+process.on('SIGINT', async () => {
+    if (cluster) await cluster.close();
+    process.exit();
+});
+
+app.listen(PORT, () => console.log(`API (Cluster): ${PORT}`));
