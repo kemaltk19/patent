@@ -1,7 +1,7 @@
 {
     "name": "turkpatent-api",
-    "version": "1.0.1",
-    "description": "Türk Patent API - High Performance",
+    "version": "1.0.2",
+    "description": "Türk Patent API - Stable Cluster",
     "main": "index.js",
     "scripts": {
         "start": "node index.js"
